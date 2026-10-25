@@ -704,7 +704,7 @@ func upload(wheel, name, version string, cfg *config) error {
 		return fmt.Errorf("twine check failed: %w", err)
 	}
 	cfg.logf("checking %s for %q %s", target0(cfg.repo), name, version)
-	if err := preflight(name, version, cfg.repo); err != nil {
+	if err := preflight(name, version, filepath.Base(wheel), cfg.repo); err != nil {
 		return fmt.Errorf("%w (wheel is built at %s)", err, wheel)
 	}
 
@@ -754,10 +754,12 @@ func indexBase(repo string) string {
 
 var indexOverride string // set by tests
 
-// preflight asks the index whether the name exists and whether this exact
-// version was already released, because PyPI answers both with a terse 400/403
-// after the upload. Network problems only produce a warning.
-func preflight(name, version, repo string) error {
+// preflight asks the index whether the name exists and whether this exact file
+// was already uploaded, because PyPI answers both with a terse 400/403 after the
+// upload. A version may hold many files (one wheel per platform), so an existing
+// version is fine as long as this platform's file is not in it. Network problems
+// only produce a warning.
+func preflight(name, version, filename, repo string) error {
 	base := indexBase(repo)
 	if indexOverride != "" {
 		base = indexOverride
@@ -782,14 +784,23 @@ func preflight(name, version, repo string) error {
 		return nil
 	}
 	var info struct {
-		Releases map[string][]json.RawMessage `json:"releases"`
+		Releases map[string][]struct {
+			Filename string `json:"filename"`
+		} `json:"releases"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not read the lookup for %q: %v\n", name, err)
 		return nil
 	}
-	if files := info.Releases[version]; len(files) > 0 {
-		return fmt.Errorf("%s %s is already on %s; versions cannot be re-uploaded, even after deleting. Pass -version with a new number", name, version, base)
+	files := info.Releases[version]
+	for _, f := range files {
+		if f.Filename == filename {
+			return fmt.Errorf("%s is already on %s; a file can never be re-uploaded, even after deleting. Pass -version with a new number", filename, base)
+		}
+	}
+	if len(files) > 0 {
+		fmt.Printf("%s %s exists on %s with %d file(s); adding this platform's wheel to it\n", name, version, base, len(files))
+		return nil
 	}
 	fmt.Fprintf(os.Stderr, "warning: %q already exists on %s. The upload only succeeds if you own that project; otherwise pick another name with -name\n", name, base)
 	return nil
