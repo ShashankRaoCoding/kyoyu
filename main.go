@@ -246,7 +246,9 @@ NAME = "{{SCRIPT}}"
 
 
 def _binary_path():
-    bin_dir = Path(__file__).parent / "bin"
+    # resolve() so the lookup still works when the launcher is reached
+    # through a symlink or a relative path.
+    bin_dir = Path(__file__).resolve().parent / "bin"
     for candidate in (NAME, NAME + ".exe"):
         path = bin_dir / candidate
         if path.exists():
@@ -254,8 +256,18 @@ def _binary_path():
     sys.exit(f"{NAME}: bundled binary not found in {bin_dir}")
 
 
+def _ensure_path(exe):
+    """Put the binary's directory first on PATH so it and anything it
+    spawns can find the bundled executables."""
+    bin_dir = str(exe.parent)
+    parts = os.environ.get("PATH", "").split(os.pathsep)
+    if bin_dir not in parts:
+        os.environ["PATH"] = os.pathsep.join([bin_dir] + [p for p in parts if p])
+
+
 def main():
     exe = _binary_path()
+    _ensure_path(exe)
     if os.name == "nt":
         sys.exit(subprocess.call([str(exe), *sys.argv[1:]]))
     # pip may strip the executable bit; restore it before exec.
