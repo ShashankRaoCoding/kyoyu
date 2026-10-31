@@ -237,12 +237,16 @@ setup(cmdclass={"bdist_wheel": PlatformWheel})
 
 const shimTmpl = `"""Launcher that runs the bundled {{SCRIPT}} binary."""
 import os
+import shlex
 import stat
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 NAME = "{{SCRIPT}}"
+MARK_BEGIN = "# >>> {{SCRIPT}} PATH >>>"
+MARK_END = "# <<< {{SCRIPT}} PATH <<<"
 
 
 def _binary_path():
