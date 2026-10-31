@@ -185,8 +185,6 @@ func installerReadme() string {
 		"for a newer release at most once a day and keeps working offline once a version is cached.\n\n" +
 		"Run a specific release:\n\n" +
 		f + "bash\n{{ENVVAR}}=1.2.3 {{SCRIPT}} --help\n" + f + "\n\n" +
-		"To put {{SCRIPT}} on your shell PATH:\n\n" +
-		f + "bash\npython -m {{PKG}} ensure\n" + f + "\n\n" +
 		"## Release assets\n\n" +
 		"Each GitHub Release must contain one file per platform named {{ASSET}}\n" +
 		"(os is linux, darwin or windows; arch is amd64, arm64, 386 or arm; ext is .exe on Windows)\n" +
@@ -207,7 +205,6 @@ import json
 import os
 import platform
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -372,8 +369,7 @@ def _resolve():
     """Pick the version to run: the pinned one, else the newest release."""
     pinned = os.environ.get(VERSION_ENV, "").strip()
     if pinned:
-        tag, path = _install(pinned)
-        return tag, path, True
+        return _install(pinned)[1]
     state_path = _cache_root() / "latest.json"
     tag, checked = _load_state(state_path)
     if tag is None or time.time() - checked > CHECK_EVERY:
@@ -386,58 +382,12 @@ def _resolve():
         except Exception as err:  # offline, rate limited, no releases...
             if tag is None:
                 _fail(f"could not look up the latest release of {REPO}: {err}")
-    tag, path = _install(tag)
-    return tag, path, False
-
-
-def _sync_stable(tag, exe):
-    """Keep a copy at a version-independent path, so a PATH entry made by
-    'ensure' stays valid across updates. Falls back to exe if it cannot."""
-    folder = _cache_root() / "bin"
-    dest = folder / exe.name
-    marker = folder / ".tag"
-    try:
-        if dest.is_file() and marker.read_text() == tag:
-            return dest
-    except OSError:
-        pass
-    try:
-        folder.mkdir(parents=True, exist_ok=True)
-        tmp = folder / (exe.name + ".new")
-        shutil.copy2(str(exe), str(tmp))
-        os.chmod(str(tmp), 0o755)
-        os.replace(str(tmp), str(dest))
-        marker.write_text(tag)
-    except OSError:
-        return exe
-    return dest
-
-
-def _norm(p):
-    return os.path.normcase(os.path.normpath(p))
-
-
-def _ensure_path(exe):
-    """Start PATH with the program's directory, then this Python environment's
-    scripts directory, without duplicates."""
-    wanted = [str(exe.parent), os.path.dirname(os.path.abspath(sys.executable))]
-    current = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
-    seen = set()
-    ordered = []
-    for p in wanted + current:
-        key = _norm(p)
-        if key not in seen:
-            seen.add(key)
-            ordered.append(p)
-    os.environ["PATH"] = os.pathsep.join(ordered)
+    return _install(tag)[1]
 
 
 def main():
-    tag, exe, pinned = _resolve()
+    exe = _resolve()
     args = sys.argv[1:]
-    if args[:1] == ["ensure"] or not pinned:
-        exe = _sync_stable(tag, exe)
-    _ensure_path(exe)
     if os.name == "nt":
         sys.exit(subprocess.call([str(exe), *args]))
     exe.chmod(exe.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

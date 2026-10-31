@@ -259,16 +259,12 @@ setup(cmdclass={"bdist_wheel": PlatformWheel})
 
 const shimTmpl = `"""Launcher that runs the bundled {{SCRIPT}} binary."""
 import os
-import shlex
 import stat
 import subprocess
 import sys
-import sysconfig
 from pathlib import Path
 
 NAME = "{{SCRIPT}}"
-MARK_BEGIN = "# >>> {{SCRIPT}} PATH >>>"
-MARK_END = "# <<< {{SCRIPT}} PATH <<<"
 
 
 def _binary_path():
@@ -282,35 +278,8 @@ def _binary_path():
     sys.exit(f"{NAME}: bundled binary not found in {bin_dir}")
 
 
-def _norm(p):
-    return os.path.normcase(os.path.normpath(p))
-
-
-def _ensure_path(exe):
-    """Guarantee PATH starts with the bundled binary's directory, followed by
-    this Python environment's scripts directory, so the binary and anything it
-    spawns can find the bundled executables and sibling console scripts."""
-    wanted = [str(exe.parent)]
-    # The directory holding this interpreter (venv/bin on POSIX, venv/Scripts on Windows).
-    scripts = os.path.dirname(os.path.abspath(sys.executable))
-    wanted.append(scripts)
-
-    current = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
-    seen = set()
-    ordered = []
-    # Our directories first (moved to the front even if already present
-    # later in PATH), then the rest in their original order, without duplicates.
-    for p in wanted + current:
-        key = _norm(p)
-        if key not in seen:
-            seen.add(key)
-            ordered.append(p)
-    os.environ["PATH"] = os.pathsep.join(ordered)
-
-
 def main():
     exe = _binary_path()
-    _ensure_path(exe)
     if os.name == "nt":
         sys.exit(subprocess.call([str(exe), *sys.argv[1:]]))
     # pip may strip the executable bit; restore it before exec.
