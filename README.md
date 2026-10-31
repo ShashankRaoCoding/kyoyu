@@ -1,6 +1,6 @@
 # kyoyu
 
-Turn a prebuilt binary into a pip-installable package and upload it to PyPI, with no Python
+Turn a prebuilt binary into a pip-installable package or dynamic pure-python installer and upload it to PyPI, with no Python
 build tooling needed to make the wheel.
 
 ```bash
