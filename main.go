@@ -47,6 +47,13 @@ type config struct {
 	yes      bool
 	force    bool
 	verbose  bool
+
+	// Installer mode (-github): publish a thin launcher that downloads the
+	// binary from GitHub Releases instead of bundling it.
+	github    string // owner/repo
+	command   string // command name users type (default: -name)
+	asset     string // release asset name template
+	checksums string // release asset listing SHA-256 sums
 }
 
 var nameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
@@ -72,8 +79,12 @@ func parseArgs(args []string) (*config, error) {
 	fs.BoolVar(&cfg.yes, "y", false, "skip the upload confirmation prompt")
 	fs.BoolVar(&cfg.verbose, "verbose", false, "print each step and run twine with --verbose")
 	fs.BoolVar(&cfg.force, "force", false, "overwrite existing generated project files")
+	fs.StringVar(&cfg.github, "github", "", "installer mode: owner/repo whose GitHub Releases hold the binaries; publishes a thin launcher instead of bundling -bin")
+	fs.StringVar(&cfg.command, "command", "", "installer mode: command name users type (default: -name, or the -bin file name)")
+	fs.StringVar(&cfg.asset, "asset", defaultAsset, "installer mode: release asset name; {script} {os} {arch} {ext} are filled in (os: linux|darwin|windows, arch: amd64|arm64|386|arm)")
+	fs.StringVar(&cfg.checksums, "checksums", defaultChecksums, "installer mode: release asset listing SHA-256 sums in sha256sum format")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: kyoyu -bin <binary> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: kyoyu -bin <binary> [flags]\n       kyoyu -github <owner/repo> -name <package> [flags]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -83,9 +94,16 @@ func parseArgs(args []string) (*config, error) {
 		fs.Usage()
 		return nil, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
+	if cfg.github != "" {
+		if err := checkInstallerFlags(cfg); err != nil {
+			fs.Usage()
+			return nil, err
+		}
+		return cfg, nil
+	}
 	if cfg.bin == "" {
 		fs.Usage()
-		return nil, fmt.Errorf("-bin is required")
+		return nil, fmt.Errorf("-bin is required (or -github for installer mode)")
 	}
 	return cfg, nil
 }
@@ -94,6 +112,10 @@ func run(args []string) error {
 	cfg, err := parseArgs(args)
 	if err != nil {
 		return err
+	}
+
+	if cfg.github != "" {
+		return runInstaller(cfg)
 	}
 
 	st, err := os.Stat(cfg.bin)
@@ -325,17 +347,7 @@ func scaffold(cfg *config, project, dist, pkg, script string) (bool, error) {
 	_, statErr := os.Stat(pyprojectPath)
 	created := os.IsNotExist(statErr)
 
-	version := cfg.version
-	if version == "" {
-		version = "0.1.0"
-		if !created {
-			if body, err := os.ReadFile(pyprojectPath); err == nil {
-				if v := parseProject(string(body)).fields["version"]; v != "" {
-					version = v
-				}
-			}
-		}
-	}
+	version := pickVersion(cfg, pyprojectPath, created)
 	desc := cfg.desc
 	if desc == "" {
 		desc = dist + ", distributed as a prebuilt binary"
@@ -375,6 +387,22 @@ func scaffold(cfg *config, project, dist, pkg, script string) (bool, error) {
 	}
 
 	return created, installBinary(cfg.bin, binDir, filepath.Base(cfg.bin))
+}
+
+// pickVersion returns -version when given, else the existing project's version,
+// else 0.1.0.
+func pickVersion(cfg *config, pyprojectPath string, created bool) string {
+	if cfg.version != "" {
+		return cfg.version
+	}
+	if !created {
+		if body, err := os.ReadFile(pyprojectPath); err == nil {
+			if v := parseProject(string(body)).fields["version"]; v != "" {
+				return v
+			}
+		}
+	}
+	return "0.1.0"
 }
 
 var versionLineRe = regexp.MustCompile(`(?m)^version\s*=\s*"[^"]*"`)
@@ -437,6 +465,7 @@ type entry struct {
 type projectMeta struct {
 	fields  map[string]string
 	scripts map[string]string
+	urls    map[string]string
 }
 
 var kvRe = regexp.MustCompile(`^\s*([A-Za-z0-9_.-]+)\s*=\s*"([^"]*)"\s*(#.*)?$`)
@@ -444,7 +473,7 @@ var kvRe = regexp.MustCompile(`^\s*([A-Za-z0-9_.-]+)\s*=\s*"([^"]*)"\s*(#.*)?$`)
 // parseProject is a small reader for the string-valued keys in [project] and
 // [project.scripts]; it is not a general TOML parser.
 func parseProject(src string) projectMeta {
-	m := projectMeta{fields: map[string]string{}, scripts: map[string]string{}}
+	m := projectMeta{fields: map[string]string{}, scripts: map[string]string{}, urls: map[string]string{}}
 	section := ""
 	for _, line := range strings.Split(src, "\n") {
 		t := strings.TrimSpace(line)
@@ -461,6 +490,8 @@ func parseProject(src string) projectMeta {
 			m.fields[kv[1]] = kv[2]
 		case "project.scripts":
 			m.scripts[kv[1]] = kv[2]
+		case "project.urls":
+			m.urls[kv[1]] = kv[2]
 		}
 	}
 	return m
@@ -517,14 +548,19 @@ func buildWheel(project, outDir, plat string) (string, error) {
 			hasBin = true
 		}
 	}
-	if !hasBin {
+	// plat "any" is installer mode: a pure-Python wheel that must not carry a binary.
+	pure := plat == "any"
+	if pure && hasBin {
+		return "", fmt.Errorf("%s holds a bundled binary from an earlier run; remove it or choose another -project", filepath.Join(pkgDir, "bin"))
+	}
+	if !pure && !hasBin {
 		return "", fmt.Errorf("no binary found in %s", filepath.Join(pkgDir, "bin"))
 	}
 
 	distInfo := fmt.Sprintf("%s-%s.dist-info", pkg, version)
 	entries = append(entries,
 		entry{distInfo + "/METADATA", []byte(metadataText(name, version, meta, project)), 0o644},
-		entry{distInfo + "/WHEEL", []byte("Wheel-Version: 1.0\nGenerator: kyoyu (go)\nRoot-Is-Purelib: false\nTag: py3-none-" + plat + "\n"), 0o644},
+		entry{distInfo + "/WHEEL", []byte(fmt.Sprintf("Wheel-Version: 1.0\nGenerator: kyoyu (go)\nRoot-Is-Purelib: %t\nTag: py3-none-%s\n", pure, plat)), 0o644},
 		entry{distInfo + "/top_level.txt", []byte(pkg + "\n"), 0o644},
 	)
 	if len(meta.scripts) > 0 {
@@ -572,6 +608,14 @@ func metadataText(name, version string, meta projectMeta, project string) string
 	}
 	if r := meta.fields["requires-python"]; r != "" {
 		fmt.Fprintf(&sb, "Requires-Python: %s\n", r)
+	}
+	labels := make([]string, 0, len(meta.urls))
+	for k := range meta.urls {
+		labels = append(labels, k)
+	}
+	sort.Strings(labels)
+	for _, k := range labels {
+		fmt.Fprintf(&sb, "Project-URL: %s, %s\n", k, meta.urls[k])
 	}
 	if readme := meta.fields["readme"]; readme != "" {
 		if body, err := os.ReadFile(filepath.Join(project, readme)); err == nil {
