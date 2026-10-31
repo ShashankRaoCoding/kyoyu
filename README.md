@@ -18,8 +18,7 @@ kyoyu is a single Go program. Given a compiled binary it:
    confirm, then uploads it with `twine`.
 
 Users then run `pip install mycli` and type `mycli`. The launcher marks the bundled binary
-executable and runs it. kyoyu does not touch `PATH` or any shell config; that is up to the
-program itself.
+executable and runs it, with its directory first on `PATH`.
 
 ## Install
 
@@ -108,6 +107,8 @@ How the launcher behaves:
 - **Cache:** binaries are kept in the user's cache directory (`~/.cache` or `$XDG_CACHE_HOME` on
   Linux, `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows). The first run needs network
   access; on a cluster, run the command once on a login node so compute nodes can use the cache.
+- **`ensure`:** if the program has an `ensure` command (as yozora does), the launcher runs a copy
+  at a version-independent path, so a `PATH` entry made by `ensure` survives updates.
 
 Installer mode has only been tested against a local test server, not against real GitHub
 Releases. The wheel is checked with `twine check`, but publishing it is up to you.
